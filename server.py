@@ -1,82 +1,124 @@
+import json
+import os
+import random
+
 import requests
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, abort, request, redirect, url_for
 
 app = Flask(__name__)
 
+BASE_URL = "https://www.themealdb.com/api/json/v1/1"
+PERSONAL_FILE = "personal_recipes.json"
+
+
+def load_personal():
+    if not os.path.exists(PERSONAL_FILE):
+        return []
+    with open(PERSONAL_FILE) as f:
+        return json.load(f)
+
+
+def save_personal(recipes):
+    with open(PERSONAL_FILE, "w") as f:
+        json.dump(recipes, f, indent=2)
+
+
+def find_personal(name):
+    for r in load_personal():
+        if r["name"] == name:
+            return r
+    return None
+
 
 def get_recipe_for(main_ingredient: str) -> dict:
-    """
-    Fetch a random recipe with a specified main ingredient.
-    The recipes are requested from "themealdb" API.
-    """
-    # YOUR CODE HERE:
-    # 1. Use `requests` to fetch a list of recipes with `main_ingredient`
-    #    - Here is a useful URL: https://www.themealdb.com/api/json/v1/1/filter.php?i=chicken_breast
-    #    - Hint: `response.json()`
-    # 2. Choose a random recipe from the list
-    #    - Hint: `random.choice()`
-    # 3. Use `requests` again to fetch the full recipe instructions
-    #    - Here is another useful URL: https://www.themealdb.com/api/json/v1/1/lookup.php?i=52772
-    # 4. Fill in the details of the returned object in the format below
+    response = requests.get(f"{BASE_URL}/filter.php", params={"i": main_ingredient})
+    meals = response.json()["meals"] or []
+
+    wanted = main_ingredient.replace("_", " ").lower()
+    personal = [r for r in load_personal()
+                if any(wanted == i.lower() for i in r["ingredients"])]
+
+    options = [("api", m) for m in meals] + [("personal", r) for r in personal]
+    if not options:
+        return None
+
+    source, chosen = random.choice(options)
+    if source == "personal":
+        return chosen
+
+    response = requests.get(f"{BASE_URL}/lookup.php", params={"i": chosen["idMeal"]})
+    meal = response.json()["meals"][0]
+
+    ingredients = {}
+    for i in range(1, 21):
+        name = meal.get(f"strIngredient{i}")
+        measure = meal.get(f"strMeasure{i}")
+        if name and name.strip():
+            ingredients[name] = measure
+
     return dict(
-        name="",
-        image="",
-        video="",
-        instructions="",
-        ingredients=dict(
-            # ingredient: measure,
-        )
+        name=meal["strMeal"],
+        image=meal["strMealThumb"],
+        video=meal["strYoutube"],
+        instructions=meal["strInstructions"],
+        ingredients=ingredients,
     )
 
 
 @app.route('/')
 def index():
-    """
-    Renders and returns the main page HTML.
-    """
     return render_template("index.html")
 
 
-# YOUR CODE HERE:
-# Make this endpoint get called when for the following routes: "/recipe/<ingredient>"
+@app.route("/recipe/<ingredient>")
 def recipe(ingredient):
-    """
-    Renders and returns an HTML page with a random recipe for a given main ingredient.
-    """
-    # BONUS:
-    # If there are no meals for a given ingredient, return a 404 NOT FOUND error response.
-    # Hint: Read the documentation of flask. This is a bonus :P
-    return render_template("recipe.html",
-                           ingredient=ingredient,
-                           recipe=get_recipe_for(ingredient))
+    found = get_recipe_for(ingredient)
+    if found is None:
+        abort(404)
+    return render_template("recipe.html", ingredient=ingredient, recipe=found)
 
 
-# YOU CODE HERE:
-# Add another endpoint:
-# Route "/recipe/<ingredient>/json" should return a JSON with the output of `get_recipe_for`.
-# Hint: `flask.jsonify()`
+@app.route("/recipe/<ingredient>/json")
+def recipe_json(ingredient):
+    found = get_recipe_for(ingredient)
+    if found is None:
+        abort(404)
+    return jsonify(found)
 
 
-# BONUS:
-# Add these endpoints:
-# 1. "/personal" with POST method:
-#    - Receives a recipe JSON in the request body, and adds it to a list of personal recipes.
-#    - Make the list persistent in a JSON file.
-#    - Redirect the client to the page of the newly saved recipe.
-#    - Hint: `flask.request`
-#    - Hint 2: `flask.redirect`
-#    - Hint 3: Use `requests` to check if it works.
-# 2. "/personal/<name>/<int:json>" with GET method:
-#    - Returns the recipe page if `json == 0`, or a JSON if `json == 1`.
-#    - Return a 404 response for flag values other than 0 or 1.
-# 3. "/personal/<name>" with DELETE method:
-#    - Delete the recipe with the given name
-# 4. "/personal/all" with GET method:
-#    - Returns a JSON with the list of personal recipes.
+@app.route("/personal", methods=["POST"])
+def add_personal():
+    new_recipe = request.get_json()
+    recipes = load_personal()
+    recipes.append(new_recipe)
+    save_personal(recipes)
+    return redirect(url_for("get_personal", name=new_recipe["name"], json=0))
 
 
-# EXTRA BONUS:
-# Change the "/recipe" endpoints above to search the personal list as well.
+@app.route("/personal/<name>/<int:json>")
+def get_personal(name, json):
+    found = find_personal(name)
+    if found is None or json not in (0, 1):
+        abort(404)
+    if json == 1:
+        return jsonify(found)
+    return render_template("recipe.html", ingredient=name, recipe=found)
+
+
+@app.route("/personal/<name>", methods=["DELETE"])
+def delete_personal(name):
+    recipes = load_personal()
+    remaining = [r for r in recipes if r["name"] != name]
+    if len(remaining) == len(recipes):
+        abort(404)
+    save_personal(remaining)
+    return jsonify(deleted=name)
+
+
+@app.route("/personal/all")
+def all_personal():
+    return jsonify(load_personal())
+
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, port=5001)
